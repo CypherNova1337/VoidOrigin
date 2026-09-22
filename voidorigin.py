@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Void Finder - OSINT origin-IP discovery for CDN/proxy-fronted websites.
+VoidOrigin - OSINT origin-IP discovery for CDN/proxy-fronted websites.
 
-Void Finder enumerates candidate IPs for a target domain from many independent
+VoidOrigin enumerates candidate IPs for a target domain from many independent
 sources, filters out addresses that belong to known CDN/WAF providers, and then
 actively *confirms* which candidate is the real origin by connecting to each IP
 directly (with the target's SNI + Host header) and comparing the response to a
@@ -853,7 +853,7 @@ def run(args, domain: str, cdn: "CdnClassifier", con: "Console") -> dict:
                nameservers=args.resolver.split(",") if args.resolver else None)
 
     if not args.quiet:
-        print(con.bold(f"\n╔══ Void Finder v{VERSION} ══╗"))
+        print(con.bold(f"\n╔══ VoidOrigin v{VERSION} ══╗"))
         print(con.dim(f"  target: {domain}   started: "
                       f"{time.strftime('%Y-%m-%d %H:%M:%S')}"))
 
@@ -967,7 +967,7 @@ def build_result(domain, cands, base_ips, elapsed, fhash) -> dict:
     confirmed = sorted([c for c in cands if c.verified],
                        key=lambda c: -c.confidence)
     return {
-        "tool": "void_finder",
+        "tool": "voidorigin",
         "version": VERSION,
         "target": domain,
         "elapsed_seconds": elapsed,
@@ -1034,8 +1034,8 @@ def report(con: Console, result: dict, cands: list[Candidate], base_ips: set):
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="void_finder.py",
-        description="Void Finder - discover the origin IP behind a CDN/proxy.",
+        prog="voidorigin.py",
+        description="VoidOrigin - discover the origin IP behind a CDN/proxy.",
         epilog="For authorized security assessment and educational use only.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -1077,7 +1077,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Verbose progress output")
     p.add_argument("-V", "--version", action="version",
-                   version=f"Void Finder {VERSION}")
+                   version=f"VoidOrigin {VERSION}")
     return p
 
 
@@ -1172,7 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # JSON payload: single object for one target, list for many.
     payload = results[0] if len(results) == 1 else {
-        "tool": "void_finder", "version": VERSION, "results": results}
+        "tool": "voidorigin", "version": VERSION, "results": results}
 
     if args.output:
         try:

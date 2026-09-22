@@ -11,7 +11,7 @@ dist/
 venv/
 env/
 
-# Void Finder output
+# VoidOrigin output
 *.json
 results/
 !package.json

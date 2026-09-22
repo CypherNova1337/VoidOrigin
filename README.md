@@ -1,24 +1,24 @@
-# Void Finder 🔎
+# VoidOrigin 🔎
 
-**Void Finder** is an OSINT tool for uncovering the **origin IP address** of a
+**VoidOrigin** is an OSINT tool for uncovering the **origin IP address** of a
 website hidden behind a CDN, WAF, or reverse proxy (Cloudflare, Akamai, Fastly,
 CloudFront, Sucuri, Imperva, and friends).
 
 Most "origin finder" scripts just dump a pile of IPs and leave you guessing.
-Void Finder goes further: it pulls candidate IPs from many independent sources,
+VoidOrigin goes further: it pulls candidate IPs from many independent sources,
 throws away the ones that provably belong to a CDN, and then **actively
 confirms** the real origin by connecting to each candidate directly — presenting
 the target's SNI and `Host` header — and comparing the response against a
 baseline of the live site (TLS certificate, page title, and body content).
 
-If a candidate serves the real site directly, Void Finder tells you, with a
+If a candidate serves the real site directly, VoidOrigin tells you, with a
 confidence score.
 
 ---
 
 ## Why it's different
 
-| Capability | Typical scripts | Void Finder |
+| Capability | Typical scripts | VoidOrigin |
 |---|---|---|
 | Candidate discovery | A records + a few subdomains | A/AAAA, MX, NS, **SPF/TXT chains**, **Certificate Transparency**, subdomain brute force, HTTP leak headers, Shodan |
 | CDN awareness | none | Live Cloudflare ranges + static ranges for 8 major providers |
@@ -45,7 +45,7 @@ confidence score.
    **favicon-hash** searches to find servers exposing the same site.
 6. **Classification & enrichment** — every IP is tagged CDN vs non-CDN and
    enriched with reverse DNS + WHOIS/ASN ownership.
-7. **Active origin verification** — for each non-CDN candidate, Void Finder
+7. **Active origin verification** — for each non-CDN candidate, VoidOrigin
    connects directly to the IP with the target's SNI + `Host` header and scores
    the match against a baseline (cert SAN coverage, `<title>`, body similarity,
    status code). Anything ≥ 60% is reported as a **confirmed origin**.
@@ -55,8 +55,8 @@ confidence score.
 ## Installation
 
 ```bash
-git clone https://github.com/CypherNova1337/Void_Finder
-cd Void_Finder
+git clone https://github.com/CypherNova1337/VoidOrigin
+cd VoidOrigin
 pip install -r requirements.txt
 ```
 
@@ -68,38 +68,38 @@ Optional (auto-detected): `shodan` and `mmh3` (favicon hashing).
 ## Usage
 
 ```bash
-python void_finder.py <domain> [more domains ...]
+python voidorigin.py <domain> [more domains ...]
 ```
 
 ### Examples
 
 ```bash
 # Full investigation
-python void_finder.py example.com
+python voidorigin.py example.com
 
 # Multiple targets at once
-python void_finder.py example.com example.org acme.test
+python voidorigin.py example.com example.org acme.test
 
 # Bulk scan from a file (one domain per line, # comments allowed)
-python void_finder.py --targets scope.txt
+python voidorigin.py --targets scope.txt
 
 # Use a Shodan key for extra pivots
-python void_finder.py example.com --shodan-key YOUR_KEY
+python voidorigin.py example.com --shodan-key YOUR_KEY
 #   ...or:  export SHODAN_API_KEY=YOUR_KEY
 
 # Save machine-readable results
-python void_finder.py example.com -o results.json
-python void_finder.py example.com --csv results.csv
-python void_finder.py example.com --json | jq .
+python voidorigin.py example.com -o results.json
+python voidorigin.py example.com --csv results.csv
+python voidorigin.py example.com --json | jq .
 
 # Faster / bigger custom wordlist
-python void_finder.py example.com -t 80 -w /path/to/subdomains.txt
+python voidorigin.py example.com -t 80 -w /path/to/subdomains.txt
 
 # DNS-only, no outbound HTTP
-python void_finder.py example.com --offline
+python voidorigin.py example.com --offline
 
 # Skip individual phases
-python void_finder.py example.com --no-brute --no-ct --no-verify
+python voidorigin.py example.com --no-brute --no-ct --no-verify
 ```
 
 ### Key options
@@ -134,7 +134,7 @@ keys are stored in source**.
   usually means the TLS certificate matches the target but the served content
   differed (e.g. a redirect or a different vhost).
 
-Void Finder also surfaces useful side-findings, such as **RFC1918 internal IPs
+VoidOrigin also surfaces useful side-findings, such as **RFC1918 internal IPs
 leaked into public DNS**.
 
 ---
