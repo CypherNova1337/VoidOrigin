@@ -1,4 +1,4 @@
-# Void Finder default subdomain wordlist
+# VoidOrigin default subdomain wordlist
 # One label per line. Lines starting with # and blank lines are ignored.
 # Curated toward hosts that commonly point at origin infrastructure rather
 # than the CDN edge (panels, mail, dev/staging, direct connects, internal apps).
