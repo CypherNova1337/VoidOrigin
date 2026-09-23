@@ -1,58 +1,50 @@
-# VoidOrigin 🔎
+# VoidOrigin
 
-**VoidOrigin** is an OSINT tool for uncovering the **origin IP address** of a
-website hidden behind a CDN, WAF, or reverse proxy (Cloudflare, Akamai, Fastly,
-CloudFront, Sucuri, Imperva, and friends).
+Finds the real server behind a CDN — and proves it's the right one.
 
-Most "origin finder" scripts just dump a pile of IPs and leave you guessing.
-VoidOrigin goes further: it pulls candidate IPs from many independent sources,
-throws away the ones that provably belong to a CDN, and then **actively
-confirms** the real origin by connecting to each candidate directly — presenting
-the target's SNI and `Host` header — and comparing the response against a
-baseline of the live site (TLS certificate, page title, and body content).
+![license](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
+![python](https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square)
 
-If a candidate serves the real site directly, VoidOrigin tells you, with a
-confidence score.
+## What it does
 
----
+When a site sits behind Cloudflare, Akamai, Fastly or similar, visitors never
+reach the actual server. The CDN takes the request, filters it, and passes on
+what it allows. That's the point — the WAF, the rate limiting and the DDoS
+protection all live at that edge.
 
-## Why it's different
+None of it helps if the origin server is still reachable directly. If you can
+find the IP the CDN forwards to, you can talk to the application with the whole
+edge stepped over: no WAF rules, no rate limits, no logging in the CDN dashboard.
+Origins get left exposed constantly, usually because the site moved behind a CDN
+years after the server was first set up and nobody restricted it afterwards.
 
-| Capability | Typical scripts | VoidOrigin |
-|---|---|---|
-| Candidate discovery | A records + a few subdomains | A/AAAA, MX, NS, **SPF/TXT chains**, **Certificate Transparency**, subdomain brute force, HTTP leak headers, Shodan |
-| CDN awareness | none | Live Cloudflare ranges + static ranges for 8 major providers |
-| **Origin confirmation** | none — just lists IPs | Direct SNI+Host probe, TLS-SAN / title / body comparison with a confidence score |
-| Speed | sequential | Concurrent (configurable thread pool) |
-| Robustness | crashes on null-MX, wildcards | Wildcard-DNS filtering, hardened error handling |
-| Output | print only | Colored report **+ machine-readable JSON** |
+VoidOrigin looks for that address. It gathers candidate IPs from several
+independent places — Certificate Transparency logs, a subdomain brute force,
+and Shodan if you give it a key — then throws away everything that belongs to a
+known CDN range.
 
----
+The part that matters is what it does next. Most tools stop at a list of
+leftover IPs and leave you guessing. VoidOrigin connects to each candidate
+**directly**, presenting the target's hostname in the TLS handshake and the
+`Host` header, and compares what comes back against the real site: does the
+certificate cover the domain, does the page title match, does the body look the
+same? Each candidate gets a score and the reasons behind it, so you get "this
+one is the origin, and here's why" instead of a pile of addresses to work
+through by hand.
 
-## How it works
+## Why you'd use it
 
-1. **DNS records** — apex `A`/`AAAA`, `MX` (mail servers often live on the
-   origin), `NS`, and `SPF`/`TXT` records (recursively following `include:` and
-   `redirect=` chains, harvesting `ip4:`/`ip6:`/`a:`/`mx:` mechanisms).
-2. **HTTP header inspection** — flags leaked `X-Real-IP`, `X-Backend-Server`,
-   `True-Client-IP`, and similar headers.
-3. **Certificate Transparency** — enumerates subdomains from `crt.sh`; forgotten
-   or dev subdomains frequently point straight at the origin.
-4. **Subdomain brute force** — concurrent resolution of a bundled wordlist
-   (biased toward panels, mail, dev/staging, and direct-connect hosts), with
-   **wildcard-DNS detection** so catch-all records don't create fake hits.
-5. **Shodan pivots** *(optional)* — `hostname:`, `ssl.cert.subject.cn:`, and
-   **favicon-hash** searches to find servers exposing the same site.
-6. **Classification & enrichment** — every IP is tagged CDN vs non-CDN and
-   enriched with reverse DNS + WHOIS/ASN ownership.
-7. **Active origin verification** — for each non-CDN candidate, VoidOrigin
-   connects directly to the IP with the target's SNI + `Host` header and scores
-   the match against a baseline (cert SAN coverage, `<title>`, body similarity,
-   status code). Anything ≥ 60% is reported as a **confirmed origin**.
+- **It confirms, rather than guessing.** Candidates are verified against a live
+  baseline and scored on certificate, title and body evidence.
+- **Several independent sources**, so a site that hid one trail is still found
+  through another.
+- **Knows the CDN ranges** and removes them, including fetching Cloudflare's
+  published lists rather than relying on a stale copy.
+- **Flags side-findings**, like internal RFC1918 addresses leaking into public
+  DNS.
+- **Offline mode** for when you only want DNS and no outbound HTTP.
 
----
-
-## Installation
+## Install
 
 ```bash
 git clone https://github.com/CypherNova1337/VoidOrigin
@@ -60,87 +52,112 @@ cd VoidOrigin
 pip install -r requirements.txt
 ```
 
-Core dependencies: `dnspython`, `requests`, `urllib3`, `ipwhois`.
-Optional (auto-detected): `shodan` and `mmh3` (favicon hashing).
-
----
+Needs Python 3.8 or newer.
 
 ## Usage
 
 ```bash
-python voidorigin.py <domain> [more domains ...]
+python3 voidorigin.py example.com
 ```
 
-### Examples
+That runs everything: collects candidates, filters the CDN, verifies what's
+left, and prints a report.
+
+**Several domains at once**
 
 ```bash
-# Full investigation
-python voidorigin.py example.com
-
-# Multiple targets at once
-python voidorigin.py example.com example.org acme.test
-
-# Bulk scan from a file (one domain per line, # comments allowed)
-python voidorigin.py --targets scope.txt
-
-# Use a Shodan key for extra pivots
-python voidorigin.py example.com --shodan-key YOUR_KEY
-#   ...or:  export SHODAN_API_KEY=YOUR_KEY
-
-# Save machine-readable results
-python voidorigin.py example.com -o results.json
-python voidorigin.py example.com --csv results.csv
-python voidorigin.py example.com --json | jq .
-
-# Faster / bigger custom wordlist
-python voidorigin.py example.com -t 80 -w /path/to/subdomains.txt
-
-# DNS-only, no outbound HTTP
-python voidorigin.py example.com --offline
-
-# Skip individual phases
-python voidorigin.py example.com --no-brute --no-ct --no-verify
+python3 voidorigin.py example.com example.org
+python3 voidorigin.py --targets scope.txt
 ```
 
-### Key options
+**Save the results**
 
-| Option | Description |
-|---|---|
-| `--targets FILE` | Bulk scan targets from a file (one per line) |
-| `-o, --output FILE` | Write full results as JSON |
-| `--csv FILE` | Write candidate rows as CSV |
-| `--json` | Print JSON to stdout (machine mode) |
-| `-w, --wordlist FILE` | Custom subdomain wordlist |
-| `-t, --threads N` | Concurrent workers (default 40) |
-| `--shodan-key KEY` | Shodan API key (or `SHODAN_API_KEY` env var) |
-| `--resolver IP[,IP]` | Custom DNS resolver(s) |
-| `--verify-all` | Verify all non-CDN IPs, including apex IPs |
-| `--no-ct` / `--no-brute` / `--no-verify` | Skip a phase |
-| `--offline` | DNS only, no outbound HTTP |
-| `--dns-timeout` / `--http-timeout` | Per-operation timeouts |
-| `-q, --quiet` / `-v, --verbose` | Output verbosity |
+```bash
+python3 voidorigin.py example.com -o results.json
+python3 voidorigin.py example.com --csv candidates.csv
+```
 
-Configuration is done entirely via flags and environment variables — **no API
-keys are stored in source**.
+**Add Shodan**
 
----
+```bash
+export SHODAN_API_KEY=...
+python3 voidorigin.py example.com
+```
 
-## Reading the report
+Shodan often knows about hosts that were indexed before the site moved behind a
+CDN, which is exactly the history you're looking for.
 
-- **★ Confirmed origin candidates** — IPs that served the real site directly.
-  Start here.
-- **CDN / WAF / public-facing IPs** — the edge; not the origin.
-- **Other non-CDN candidates** — worth manual investigation. A score like `55%`
-  usually means the TLS certificate matches the target but the served content
-  differed (e.g. a redirect or a different vhost).
+**Quiet the noise**
 
-VoidOrigin also surfaces useful side-findings, such as **RFC1918 internal IPs
-leaked into public DNS**.
+```bash
+python3 voidorigin.py example.com --no-brute --no-ct
+```
 
----
+Useful when you already have candidates and only want the verification step.
 
-## Disclaimer
+**Look, but touch nothing**
 
-This tool is intended for **authorized security assessment and educational use
-only**. Only run it against systems you own or have explicit written permission
-to test. You are responsible for how you use it.
+```bash
+python3 voidorigin.py example.com --offline
+```
+
+DNS only — no outbound HTTP, no connections to the target.
+
+## Options
+
+| Flag | Default | What it does |
+|---|---|---|
+| `domain` | — | One or more target domains |
+| `--targets FILE` | — | File of domains, one per line (`#` comments allowed) |
+| `-o FILE` | — | Write full results as JSON |
+| `--csv FILE` | — | Write candidate rows as CSV |
+| `--json` | off | Print JSON to stdout instead of a report |
+| `-w FILE` | bundled | Custom subdomain wordlist |
+| `-t` | `40` | Concurrent DNS and probe workers |
+| `--dns-timeout` | `5.0` | Per-query DNS timeout, in seconds |
+| `--http-timeout` | `8.0` | Probe timeout, in seconds |
+| `--resolver IP[,IP]` | system | Use specific DNS resolvers |
+| `--shodan-key KEY` | — | Shodan API key, or set `SHODAN_API_KEY` |
+| `--no-ct` | off | Skip Certificate Transparency lookups |
+| `--no-brute` | off | Skip the subdomain brute force |
+| `--no-verify` | off | Skip active verification — collect candidates only |
+| `--verify-all` | off | Verify every non-CDN IP, including the apex |
+| `--offline` | off | DNS only; no outbound HTTP at all |
+| `-q` | off | Print the final report and nothing else |
+| `-v` | off | Verbose progress |
+| `--no-color` | off | Disable coloured output |
+| `-V` | — | Print version and exit |
+
+## Reading the results
+
+Each candidate gets a score and the evidence behind it. The strongest signals
+are a **certificate that covers the domain** and a **page title matching the
+live site** — together they're hard to explain any other way. Body similarity
+supports those but is weaker on its own, since shared hosting and default pages
+can look alike.
+
+A high score means the IP served the target's site when asked directly. That is
+the finding: the origin is reachable without going through the CDN.
+
+## Good to know
+
+- **Verification connects to the candidate**, so it is not a passive scan.
+  `--offline` or `--no-verify` if you need to stay quiet.
+- **A clean run doesn't prove the origin is locked down.** It proves these
+  sources didn't reveal it. A properly restricted origin looks the same as one
+  you simply haven't found yet.
+- **Shodan changes the results noticeably.** If a target looks like a dead end
+  without a key, it's worth trying again with one.
+- **Cloud front-ends move.** An IP that verified last month may belong to
+  somebody else now, so re-check before acting on old output.
+
+## Authorised use
+
+Only run this against domains you own or have written permission to test.
+Connecting directly to an origin is an interaction with that host, and
+reaching a server the owner believes is protected is exactly the kind of
+finding that needs to be in scope before you go looking.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
