@@ -32,10 +32,12 @@ import concurrent.futures as futures
 import ipaddress
 import json
 import os
+import queue
 import re
 import socket
 import ssl
 import sys
+import threading
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Iterable
@@ -831,6 +833,11 @@ def enrich(cand: Candidate, dnsc: "Dns", timeout: float, whois: bool = True):
     cand.ptr = dnsc.reverse(cand.ip)
     if not whois:
         return
+    # CDN/WAF IPs: the provider is already known from classification, so skip
+    # the (slow, flaky) RDAP call entirely.
+    if cand.is_cdn:
+        cand.org = cand.cdn_name or "CDN"
+        return
     try:
         addr = ipaddress.ip_address(cand.ip)
         if addr.is_private:
@@ -849,28 +856,62 @@ def enrich(cand: Candidate, dnsc: "Dns", timeout: float, whois: bool = True):
 
 def enrich_all(cands: list[Candidate], con: Console, dnsc: "Dns", timeout: float,
                threads: int, whois: bool = True):
-    """Enrich every candidate concurrently under an overall wall-clock budget.
+    """Enrich every candidate using a pool of DAEMON worker threads under an
+    overall wall-clock budget.
 
-    Each enrich() call is individually time-bounded, and the whole step is
-    capped so a pathological host can never hang the run at step 6."""
+    Daemon threads are the key to never hanging: a stuck reverse-DNS or WHOIS
+    call cannot block interpreter exit (unlike ThreadPoolExecutor workers, which
+    are joined by an atexit hook). If the budget is hit, remaining IPs are simply
+    reported without full enrichment and the run continues."""
     if not cands:
         return
-    workers = min(threads, 16)
-    per_ip = timeout * (2.5 if whois else 1.0)          # PTR + (bounded) WHOIS
-    budget = max(30.0, per_ip * (len(cands) / workers + 1) + 5.0)
+    workers = max(1, min(threads, 16))
+    work: "queue.Queue[Candidate]" = queue.Queue()
+    for c in cands:
+        work.put(c)
 
-    ex = futures.ThreadPoolExecutor(max_workers=workers)
-    futs = {ex.submit(enrich, c, dnsc, timeout, whois): c for c in cands}
-    try:
-        for _ in futures.as_completed(futs, timeout=budget):
-            pass
-    except futures.TimeoutError:
-        pending = [futs[f] for f in futs if not f.done()]
-        con.warn(f"enrichment budget ({int(budget)}s) hit; "
-                 f"{len(pending)} IP(s) reported without full WHOIS/PTR")
-    finally:
-        # Do not block on stragglers; each worker is time-bounded and will exit.
-        ex.shutdown(wait=False, cancel_futures=True)
+    done = 0
+    lock = threading.Lock()
+
+    def worker():
+        nonlocal done
+        while True:
+            try:
+                cand = work.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                enrich(cand, dnsc, timeout, whois)
+            except Exception:
+                pass
+            with lock:
+                done += 1
+
+    for _ in range(workers):
+        threading.Thread(target=worker, daemon=True).start()
+
+    total = len(cands)
+    per_ip = timeout * (2.5 if whois else 1.2)          # PTR + (bounded) WHOIS
+    budget = max(20.0, per_ip * (total / workers + 1) + 5.0)
+    deadline = time.time() + budget
+    last_note = 0.0
+    while time.time() < deadline:
+        with lock:
+            n = done
+        if n >= total:
+            break
+        if con.verbose and time.time() - last_note > 2.0:
+            con.vinfo(f"enriched {n}/{total} IPs...")
+            last_note = time.time()
+        time.sleep(0.2)
+
+    with lock:
+        n = done
+    if n < total:
+        con.warn(f"enrichment budget ({int(budget)}s) hit at {n}/{total}; "
+                 "remaining IPs reported without full WHOIS/PTR")
+    # Daemon workers are intentionally NOT joined: any straggler is abandoned at
+    # exit and can never freeze the process.
 
 
 # ---------------------------------------------------------------------------
@@ -1168,6 +1209,13 @@ def write_csv(path: str, results: list[dict], con: Console):
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Line-buffer stdout so progress/report appear in real time even when the
+    # output is piped or redirected (block-buffered by default).
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
