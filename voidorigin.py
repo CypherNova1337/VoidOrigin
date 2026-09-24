@@ -45,6 +45,7 @@ _MISSING: list[str] = []
 try:
     import dns.resolver
     import dns.exception
+    import dns.reversename
 except Exception:  # pragma: no cover
     _MISSING.append("dnspython")
 try:
@@ -265,6 +266,18 @@ class Dns:
         for rec in self.query(name, "AAAA"):
             ips.append(rec.address)
         return ips
+
+    def reverse(self, ip: str) -> str | None:
+        """PTR lookup for an IP with a hard timeout (via the resolver lifetime).
+
+        Uses dnspython rather than socket.gethostbyaddr(), which has no timeout
+        and can block a worker thread indefinitely on hosts with no PTR."""
+        try:
+            rev = dns.reversename.from_address(ip)
+            ans = self.resolver.resolve(rev, "PTR")
+            return str(ans[0]).rstrip(".")
+        except Exception:
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -813,11 +826,9 @@ def verify_origin(cand: Candidate, domain: str, baseline: Baseline,
 # ---------------------------------------------------------------------------
 
 
-def enrich(cand: Candidate, timeout: float, whois: bool = True):
-    try:
-        cand.ptr = socket.gethostbyaddr(cand.ip)[0]
-    except Exception:
-        cand.ptr = None
+def enrich(cand: Candidate, dnsc: "Dns", timeout: float, whois: bool = True):
+    # Reverse DNS via dnspython so the lookup is time-bounded (see Dns.reverse).
+    cand.ptr = dnsc.reverse(cand.ip)
     if not whois:
         return
     try:
@@ -825,8 +836,10 @@ def enrich(cand: Candidate, timeout: float, whois: bool = True):
         if addr.is_private:
             cand.org = "Private / RFC1918"
             return
-        obj = IPWhois(cand.ip)
-        res = obj.lookup_rdap(depth=1)
+        # Bounded WHOIS: short socket timeout, a single retry, no recursive
+        # entity depth, so a slow/blocked RDAP endpoint can't stall the run.
+        obj = IPWhois(cand.ip, timeout=max(2.0, min(timeout, 6.0)))
+        res = obj.lookup_rdap(depth=0, retry_count=1, rate_limit_timeout=2)
         cand.asn = res.get("asn")
         cand.org = (res.get("asn_description")
                     or res.get("network", {}).get("name") or "N/A")
@@ -834,10 +847,30 @@ def enrich(cand: Candidate, timeout: float, whois: bool = True):
         cand.org = f"whois failed ({type(e).__name__})"
 
 
-def enrich_all(cands: list[Candidate], con: Console, timeout: float, threads: int,
-               whois: bool = True):
-    with futures.ThreadPoolExecutor(max_workers=min(threads, 16)) as ex:
-        list(ex.map(lambda c: enrich(c, timeout, whois), cands))
+def enrich_all(cands: list[Candidate], con: Console, dnsc: "Dns", timeout: float,
+               threads: int, whois: bool = True):
+    """Enrich every candidate concurrently under an overall wall-clock budget.
+
+    Each enrich() call is individually time-bounded, and the whole step is
+    capped so a pathological host can never hang the run at step 6."""
+    if not cands:
+        return
+    workers = min(threads, 16)
+    per_ip = timeout * (2.5 if whois else 1.0)          # PTR + (bounded) WHOIS
+    budget = max(30.0, per_ip * (len(cands) / workers + 1) + 5.0)
+
+    ex = futures.ThreadPoolExecutor(max_workers=workers)
+    futs = {ex.submit(enrich, c, dnsc, timeout, whois): c for c in cands}
+    try:
+        for _ in futures.as_completed(futs, timeout=budget):
+            pass
+    except futures.TimeoutError:
+        pending = [futs[f] for f in futs if not f.done()]
+        con.warn(f"enrichment budget ({int(budget)}s) hit; "
+                 f"{len(pending)} IP(s) reported without full WHOIS/PTR")
+    finally:
+        # Do not block on stragglers; each worker is time-bounded and will exit.
+        ex.shutdown(wait=False, cancel_futures=True)
 
 
 # ---------------------------------------------------------------------------
@@ -932,7 +965,8 @@ def run(args, domain: str, cdn: "CdnClassifier", con: "Console") -> dict:
     cands = reg.all()
     for c in cands:
         c.is_cdn, c.cdn_name = cdn.classify(c.ip)
-    enrich_all(cands, con, args.http_timeout, args.threads, whois=not args.offline)
+    whois_on = not args.offline and not getattr(args, "no_whois", False)
+    enrich_all(cands, con, dnsc, args.http_timeout, args.threads, whois=whois_on)
     con.good(f"{len(cands)} unique IPs collected "
              f"({sum(1 for c in cands if c.is_cdn)} CDN / "
              f"{sum(1 for c in cands if not c.is_cdn)} non-CDN)")
@@ -988,7 +1022,7 @@ def build_result(domain, cands, base_ips, elapsed, fhash) -> dict:
 def report(con: Console, result: dict, cands: list[Candidate], base_ips: set):
     line = "═" * 64
     print(f"\n{con.bold(line)}")
-    print(con.bold(f"  VOID FINDER REPORT — {result['target']}"))
+    print(con.bold(f"  VOIDORIGIN REPORT — {result['target']}"))
     print(con.dim(f"  {result['total_candidates']} candidate IPs in "
                   f"{result['elapsed_seconds']}s"))
     print(con.bold(line))
@@ -1067,6 +1101,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Skip subdomain brute force")
     p.add_argument("--no-verify", action="store_true",
                    help="Skip active origin verification")
+    p.add_argument("--no-whois", action="store_true",
+                   help="Skip WHOIS/RDAP enrichment (faster; PTR only)")
     p.add_argument("--verify-all", action="store_true",
                    help="Verify all non-CDN IPs (including apex IPs)")
     p.add_argument("--offline", action="store_true",
