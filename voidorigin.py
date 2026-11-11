@@ -324,6 +324,7 @@ STATIC_CDN_RANGES: dict[str, list[str]] = {
         "199.83.128.0/21", "198.143.32.0/19", "149.126.72.0/21",
         "103.28.248.0/22", "45.64.64.0/22", "185.11.124.0/22",
         "192.230.64.0/18", "45.60.0.0/16", "45.223.0.0/16", "107.154.0.0/16",
+        "131.125.128.0/17", "2a02:e980::/29",
     ],
     "StackPath/Highwinds": [
         "151.139.0.0/19", "205.185.192.0/18", "192.16.0.0/16",
@@ -347,6 +348,7 @@ class CdnClassifier:
                     pass
         if not offline:
             self._refresh_cloudflare()
+            self._refresh_imperva()
 
     def _refresh_cloudflare(self):
         for url in ("https://www.cloudflare.com/ips-v4",
@@ -369,6 +371,29 @@ class CdnClassifier:
                                    f"from {url}")
             except Exception:
                 self.con.vinfo(f"could not refresh Cloudflare ranges from {url}")
+
+    def _refresh_imperva(self):
+        # Imperva/Incapsula publishes its edge ranges here; keeping them current
+        # stops WAF-edge IPs from being mistaken for origins.
+        url = "https://my.incapsula.com/api/integration/v1/ips"
+        try:
+            r = requests.get(url, timeout=8, headers={"User-Agent": DEFAULT_UA})
+            if r.status_code != 200:
+                self.con.vinfo(f"Imperva range endpoint returned {r.status_code}")
+                return
+            data = r.json()
+            added = 0
+            for cidr in (data.get("ipRanges", []) + data.get("ipv6Ranges", [])):
+                try:
+                    self.networks.append(
+                        (ipaddress.ip_network(cidr.strip()), "Imperva/Incapsula"))
+                    added += 1
+                except (ValueError, AttributeError):
+                    pass
+            self.con.vinfo(f"loaded {added} live Imperva/Incapsula ranges")
+        except Exception:
+            self.con.vinfo("could not refresh Imperva/Incapsula ranges "
+                           "(using static list)")
 
     def classify(self, ip: str) -> tuple[bool, str | None]:
         try:
@@ -789,36 +814,53 @@ def verify_origin(cand: Candidate, domain: str, baseline: Baseline,
 
     score = 0
     reasons: list[str] = []
+    content_matched = False
+    # WAF/edge block or challenge responses: a cert match on one of these is the
+    # edge's signature, never the origin.
+    waf_block = got and status in (403, 429, 503)
 
-    # Certificate SAN match (strong).
+    # Certificate SAN match: a strong signal, but WAFs/proxies present the
+    # origin's certificate too, so this alone must never confirm an origin.
     if baseline.scheme == "https":
         cnames = cert_names_for_host(domain, port, timeout, connect_ip=cand.ip)
         if _cert_covers(cnames, domain):
-            score += 55
+            score += 40
             reasons.append("cert covers domain")
 
     if got:
         title = _extract_title(body)
         if baseline.title and title and title == baseline.title:
-            score += 45
+            score += 50
+            content_matched = True
             reasons.append("title match")
         ratio = _similarity(baseline.body, body[:20000])
         if ratio >= 0.90:
-            score += 45
+            score += 55
+            content_matched = True
             reasons.append(f"body {int(ratio*100)}% match")
         elif ratio >= 0.60:
-            score += 20
+            score += 20                       # weak lead, not a confirmation
             reasons.append(f"body {int(ratio*100)}% match")
-        if status and status == baseline.status:
+        # Status bonus only for a real served page (2xx/3xx), never an error.
+        if status == baseline.status and 200 <= status < 400:
             score += 5
             reasons.append(f"status {status}")
+        if waf_block:
+            reasons.append(f"WAF/edge block (status {status})")
 
     cand.confidence = min(score, 100)
     cand.verify_detail = ", ".join(reasons) if reasons else "no match"
-    cand.verified = cand.confidence >= 60
+    # Confirmation REQUIRES a real content match (exact title or ~identical body)
+    # AND a non-block response. Cert coverage plus a coincidental status match on
+    # a 503/403/429 block page (the classic Incapsula/Imperva signature) no
+    # longer counts as a confirmed origin.
+    cand.verified = (cand.confidence >= 60 and content_matched and not waf_block)
     if cand.verified:
         con.hit(f"ORIGIN MATCH {cand.ip} "
                 f"(confidence {cand.confidence}%: {cand.verify_detail})")
+    elif waf_block:
+        con.vinfo(f"{cand.ip}: WAF/edge block, not origin "
+                  f"({cand.confidence}%: {cand.verify_detail})")
     elif cand.confidence > 0:
         con.vinfo(f"{cand.ip}: partial ({cand.confidence}%: {cand.verify_detail})")
 
